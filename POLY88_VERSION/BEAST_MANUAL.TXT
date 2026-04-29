@@ -1,0 +1,246 @@
+
+  ___ ___   _   ___ _____ 
+ | _ ) __| /_\ / __|_   _|
+ | _ \ _| / _ \\__ \ | |  
+ |___/___/_/ \_\___/ |_|  
+                          
+ *************************
+   BEAST for the POLY-88
+ *************************
+
+By Steve Lewis (Xiphod), April 2026
+contact.steve.usa@gmail.com
+
+Intended to be loaded and executed at address 0x2000.
+
+Makes use of the VTI "Greek symbols" character set.
+
+Could be adapted to other Intel 8080 systems, if can
+accommodate the following:
+
+- Three byte timer is expected at 0C00H (for RNG rolls
+  and timer delta counts for events)
+- Keypress buffer expected at 0C0DH
+- VTI video output expected at F800H
+- The code is about 6KB
+- Unsure if keyboard scan codes and display codes will
+  be the same.  But a "pure ASCII" version is fairly
+  easy also.
+
+123456789012345678901234567890123456789012345678901234567890123
+---------------------------------------------------------------
+
+BACKGROUND
+==========
+BEAST is a scaled-down clone of a game by the same name 
+available on the MS-DOS platform from 1984.  It is a 
+single-scene text mode game.  The MS-DOS version used 80-column
+mode but made clever use of "two character wide icons" to
+effectively make it a 40-column game.  For this POLY-88 
+version, a combination of VTI 2x3 pixel symbols and regular 
+text mode is used.
+
+Your basic objective is to push the blocks around, trap
+a beast in between two blocks, and then SMASH them!
+
+
+OVERALL GAME RULES
+==================
+You (PLAYER) start in an arena, generally spawned onto the 
+left side.  Two or more BEAST are spawned on the right side.
+
+Within the arena is randomly placed two types of objects:
+
+(1) BLOCKS, which you can PUSH or PULL.  To PUSH a block, you
+just move into them and push them in the direction you are
+going.  You can even push multiple blocks!  However, you
+cannot push into TREES or BEAST (with one exception, 
+see below), nor can you push into the arena border walls.
+
+(2) TREES, which are strongly rooted and cannot be moved.
+
+Near each BEAST is spawned an EGG.  The BEAST have a strong
+sense of smell and will begin seeking you out right away,
+to protect their egg.  BEAST can sometimes move diagonally.
+
+NOTE: To simplify the game, I decided that the player can
+only move in cardinal directions (4-way) and not diagonal.
+
+Your objective is to squash all BEAST using the BLOCKS.
+Keep in mind you can pull blocks, use this to make little
+defensive forts or set traps for the BEAST.  However,
+be aware that you cannot pull a BLOCK that is near a BEAST!
+
+At the start of the round, the EGGS will have a random
+duration until they hatch into an INFANT (typically like
+around 20 seconds).  If you are quick, you can simply
+move a BLOCK and rollover an EGG.  But your main objective
+is only to smash any BEAST - so best to do so before EGGS
+become INFANTS, since INFANTS will also eventually grow
+to become BEAST (but they won't spawn additional eggs).
+
+If a BEAST runs into you - or if you run into a beast by
+accident - you are defeated instantly.  Also EGGS and 
+INFANTS are poisonous, so don't touch them.  You can 
+rollover EGGS with BLOCKS, or squish INFANTS or BEAST 
+between two BLOCKs (or the outer arena wall).
+
+TREES do count as BLOCKS, but they are very rooted and 
+cannot be moved.
+
+Each round, there is a random number of BLOCKs and TREEs
+generated.  There is always at least two BEAST.  Each BEAST
+should have an egg near it.  BEAST won't step on or 
+harm eggs.
+
+
+CONTROLS
+========
+WASD  Move up, left, down, right
+(you cannot move into arena border, trees; do not
+move into BEAST, EGGS, or INFANTS)
+
+IJKL  Activate PULL, and any BLOCK opposite your
+      direction of movement will be pulled.
+      (unless there is a BEAST touching the BLOCK)
+
+NOTE: On the MS-DOS version, PULL was activated by
+holding SPACEBAR and using direction keys.  For the
+POLY-88, I didn't know how to check multiple key presses
+at the same time.  So I decided separate movement
+and pull controls.
+
+
+
+TECHNICAL NOTES
+===============
+There are two types of beast, one is a little more
+aggressive and smarter (and more likely to go diagonal).
+The sleepy-beast is only a 40% chance of spawning, but
+they will promote into the more aggressive diagonal-moving
+beast once they are within about 5 cells of the player.
+
+After loading the game from tape, it will auto start at
+address 0x2000 hex.  If it gets stuck for any reason,
+here is how to restart it: CTRL+Z (access 4.0 MONITOR), 
+do "SPJ" command, enter address 2000, ENTER.  
+Then G to GO.
+
+
+SPECIAL FEATURES
+================
+On startup, "3...2...1..." countdown is used as a round
+starting delay, and to help highlight where your character
+will be starting from within the arena.
+
+If you get defeated by a beast or run into a poison item 
+(egg or infant), the object defeating you will flash for
+a few moments before the next round.  Touching a poison
+item (egg or infant) displays SKULL GRAPHIC on the sides.
+Touching a beast displays DEATH GRAPHIC on the sides.
+
+The objective on each round is to defeat any active BEAST
+by smashing them.  Once you do that, the YOU WIN graphic
+shows and goes to the next round.  This graphic flashes
+by inverting the VTI symbols briefly, and it first
+flashes quickly then gradually a little slower.
+
+EGGS do not need to be defeated nor INFANTS.   However, 
+keep in mind that EGGS are easy to wipe, since you can 
+just run them over with BLOCKS.
+
+Anytime you smash something, the word SMASH flashes
+on the left.  It's subtle, but this graphic is
+"non-blocking" - so if you end up doing a chain of
+say three smashes in a row, this graphic won't stutter
+or lag the player in doing so!
+
+In the code there is:
+BLOCKCHR        EQU     0FFH    ; WHITE BLOCK
+I went back and forth on whether the BLOCK symbol should
+be 00H or FFH.  If you use 00H, that is a full 2x3 pixel
+block that fill the entire cell.  If you use FFH, you
+get a little spacing between the blocks.   To me, 00H
+feels a little imbalanced.  But FFH loses the "solid wall"
+feel.  But I've learned towards using the FFH symbol.
+
+Omega is the only upper case Greek letter than the stock
+VTI symbol set had.
+
+PI was the only symbol that sort of had "legs."
+
+MAXBEAST        EQU     8
+NUMBEAST        EQU     4
+MINBEAST        EQU     2
+The code has these three equates, and a lot of time was
+spent supporting this.  Because each BEAST spawns also
+with an EGG that can potentially become a BEAST, then
+MAXBEAST should always be at least double NUMBEAST.
+NUMBEAST sets upper limit of how many BEAST will be
+spawned per round.  I've tested with this up to 6, and
+the game gets very exciting with 12 BEAST running around.
+Performance was I think the game engine could handle
+more beast, but due to the practical size of the arena,
+I felt maximum of 8 was enough.  In any case, the game
+is prepared to dynamically scale up in difficult, but
+I just wanted a more casual build for now.
+
+For each round, there is roughly 18 to 25 BLOCKs
+randomly placed.  For TREES, it is about 8 to 15.
+Effort is taken so that nothing is placed on top of
+anything else (like BEAST don't spawn into walls,
+eggs don't spawn into trees, etc.).
+
+EGGS hatch in about 20 seconds, and after that the 
+INFANTS grow into BEAST in a little less time 
+(about 12 seconds).
+
+The "attract mode" graphic on the right side that
+says BEAST: this will alternate styles in between
+each round.
+
+The ASM code was compiled using Alfred Arnold
+AS assembler (asl.exe).
+
+poly88_vti_encode.py is a Python script used to
+convert 2-color BMP file into a DB array of hex
+values corresponding to suitable 2x3 VTI symbols
+that match the BMP.  This made it easy to add the
+pixel graphics into the game.
+
+
+HOW TO LOAD
+===========
+On the Bob Bybee emulator (PM.EXE), do:
+PM -88
+
+Once loaded with the cursor on the top left,
+press CTRL+F1 to enter the emulator console.
+From there, type "I 2000 BEAST.BIN" to load the
+binary into address 0x2000 directly. Then
+press G<ENTER> to resume the emulator.
+
+Then do CTRL+Z to activate the MONITOR.
+Type "SPJ" to set the address of the Program
+Counter.  Type "2000" (hex is assumed).
+Then do "G" to GO.
+
+
+When using an audio cassette tape:
+Startup the POLY-88 system.  When the top left
+prompt block appears, type "B" for BYTE MODE.
+Type "BEAST" for the name of the Program.
+If you type it wrong, you can't backspace, so in 
+that case just press RESET and start again.
+
+Press ENTER then PLAY on the audio tape.
+Loading will take a few minutes.  You can use
+the WAV or an actual audio tape.
+
+When loading, you'll see some status of
+the load progress.
+
+Once loaded, the program should auto-start
+at address 0x2000 automatically.  If it does
+not, then the load probably failed.
+
