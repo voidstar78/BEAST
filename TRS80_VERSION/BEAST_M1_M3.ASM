@@ -2,14 +2,9 @@
         ORG     5200H
 
 ; ============================================================
-; TRS-80 MODEL I MINI-BEAST - FIRST PORT BUILD, RELOCATED 5200H
-; CONSOLIDATED BUILD WITH:
-;   - EXTENDED TO 6 BEAST SLOTS
-;   - MOVE/PUSH
-;   - PULL + SINGLE FRONT PUSH
-;   - 2 BEASTS WITH DIAGONAL / STUCK AI
-;   - TITLE / LEGEND
-;   - RIGHT-SIDE BRAIDED ATTRACT PANEL
+; TRS-80 MODEL I 8-BIT MINI-BEAST @ 5200H
+; VERSION 1.0 - BY XIPHOD - APRIL 2026
+; PORTED FROM POLY-88 VTI 8080 VERSION
 ; ============================================================
 
 VBASE           EQU     03C00H   ; TRS-80 Model I video RAM
@@ -21,6 +16,11 @@ BEASTCHR_M1     EQU     07EH    ; Model I beast symbol
 BEASTCHR_M3     EQU     07FH    ; Model III beast symbol
 BLOCKCHR_M1     EQU     0FFH    ; Model I solid block
 BLOCKCHR_M3     EQU     0BFH    ; Model III full 2x3 semigraphic block
+; 7-bit video-RAM safe aliases for Model I boards that do not preserve bit 6.
+; These are the values that survive write/readback on that hardware.
+PLAYERCHR_7     EQU     00FH    ; 7-bit degraded: uppercase O visual / readback-safe
+BEASTCHR_7      EQU     002H    ; 7-bit degraded: uppercase B visual / readback-safe
+BLOCKCHR_7      EQU     0BFH    ; 0FFH with bit 6 cleared
 TREECHR         EQU     040H    ; @ / tree marker
 SPACECHR        EQU     020H    ; SPACE
 ; Arena border is stored as POLY/VTI 2x3 semigraphic patterns
@@ -50,7 +50,7 @@ KEY_J           EQU     0CAH
 KEY_K           EQU     0CBH
 KEY_L           EQU     0CCH
 
-PLAYERDLY       EQU     02H     ; player repeat throttle; BEAST/global pacing unchanged
+PLAYERDLY       EQU     03H     ; player repeat throttle; BEAST/global pacing unchanged
 GAMEDELAY_M1    EQU     0400H   ; global loop throttle for Model I
 GAMEDELAY_M3    EQU     04C0H   ; slightly slower delay for faster Model III timing
 
@@ -95,11 +95,17 @@ START:
         CALL    RESET_GAME
 
 MAINLOOP:
+        CALL    BREAK_KEY
+        ORA     A
+        JZ      ML_NO_BREAK
+        JMP     SOFT_RESTART    ; return to attract screen, preserving selected modes
+ML_NO_BREAK:
         CALL    GAME_DELAY
         CALL    FRAME_TICK
 
         CALL    UPDATE_EGGS
         CALL    UPDATE_SMASH_FLASH
+        CALL    UPDATE_BEAST_BANNER_FLASH
 
         LDA     ROUNDWIN
         ORA     A
@@ -187,8 +193,8 @@ NOKEY:
 INIT_VIDEO_MODE:
         XRA     A
         STA     VIDMODE         ; default to Model I
-        STA     MODESHOW        ; hide label unless autodetected/toggled
-        CALL    APPLY_VIDEO_MODE
+        MVI     A,1
+        STA     MODESHOW        ; always show startup mode labels now
 
         ; Best-effort Model III BASIC clock heuristic.
         ; 4217H is the Model III BASIC seconds byte; if it changes during
@@ -203,12 +209,17 @@ INIT_VIDEO_MODE:
         CALL    IVM_WAIT_LONG     ; second chance: seconds byte may have just ticked
         LDA     04217H
         CMP     B
-        RZ
+        JNZ     IVM_IS_M3
+
+        ; Model I path: test whether video RAM preserves bit 6.
+        CALL    DETECT_VIDEO_BITS
+        JMP     APPLY_VIDEO_MODE
 
 IVM_IS_M3:
         MVI     A,1
         STA     VIDMODE
         STA     MODESHOW
+        STA     VIDBITMODE      ; Model III: assume 8-bit video RAM
         JMP     APPLY_VIDEO_MODE
 
 IVM_WAIT_LONG:
@@ -220,7 +231,43 @@ IVM_WAIT:
         JNZ     IVM_WAIT
         RET
 
+; Writes 60H to top-left video RAM and reads it back.
+; 60H read back as 20H means bit 6 is not preserved.
+; VIDBITMODE: 0=7-bit-safe, 1=8-bit
+DETECT_VIDEO_BITS:
+        LDA     VBASE
+        MOV     B,A             ; save old top-left byte
+        MVI     A,060H
+        STA     VBASE
+        LDA     VBASE
+        CPI     060H
+        MVI     C,0             ; default 7-bit-safe
+        JNZ     DVB_RESTORE
+        MVI     C,1             ; 8-bit
+DVB_RESTORE:
+        MOV     A,B
+        STA     VBASE
+        MOV     A,C
+        STA     VIDBITMODE
+        RET
+
 APPLY_VIDEO_MODE:
+        ; 7-bit video RAM mode overrides only the problematic runtime symbols.
+        LDA     VIDBITMODE
+        ORA     A
+        JNZ     AVM_8BIT
+AVM_7BIT:
+        MVI     A,PLAYERCHR_7
+        STA     CURPLAYERCHR
+        MVI     A,BEASTCHR_7
+        STA     CURBEASTCHR
+        MVI     A,BLOCKCHR_7
+        STA     CURBLOCKCHR
+        RET
+
+AVM_8BIT:
+        MVI     A,PLAYERCHR
+        STA     CURPLAYERCHR
         LDA     VIDMODE
         ORA     A
         JZ      AVM_M1
@@ -248,7 +295,7 @@ ATTRACT_START:
         CALL    ATTRACT_TEXT
         XRA     A
         STA     HEADPOS
-        MVI     A,28
+        MVI     A,35
         STA     TAILPOS
         MVI     A,10
         STA     ATTRARMED       ; startup debounce frames before accepting keys
@@ -265,9 +312,13 @@ ATTR_LOOP:
         JMP     ATTR_LOOP
 
 ATTR_ACCEPT:
-        CALL    ENTER_KEY
+        CALL    M_KEY
         ORA     A
         JNZ     ATTR_TOGGLE
+
+        CALL    T_KEY
+        ORA     A
+        JNZ     ATTR_BIT_TOGGLE
 
         CALL    ANY_KEY
         ORA     A
@@ -282,10 +333,23 @@ ATTR_TOGGLE:
         STA     MODESHOW
         CALL    APPLY_VIDEO_MODE
         CALL    DRAW_MODE_LABEL
+        CALL    DRAW_BITS_LABEL
 ATTR_TOGGLE_WAIT:
-        CALL    ENTER_KEY
+        CALL    M_KEY
         ORA     A
         JNZ     ATTR_TOGGLE_WAIT
+        JMP     ATTR_LOOP
+
+ATTR_BIT_TOGGLE:
+        LDA     VIDBITMODE
+        XRI     01H
+        STA     VIDBITMODE
+        CALL    APPLY_VIDEO_MODE
+        CALL    DRAW_BITS_LABEL
+ATTR_BIT_TOGGLE_WAIT:
+        CALL    T_KEY
+        ORA     A
+        JNZ     ATTR_BIT_TOGGLE_WAIT
         JMP     ATTR_LOOP
 
 ATTRACT_TEXT:
@@ -298,15 +362,21 @@ ATTRACT_TEXT:
         LXI     H,ATTRTXT2
         CALL    PUTSTR_BC
         MVI     B,9
-        MVI     C,22
+        MVI     C,23
         LXI     H,ATTRTXT3
         CALL    PUTSTR_BC
-        CALL    DRAW_MODE_LABEL_IF_SHOWN
+        MVI     B,10
+        MVI     C,22
+        LXI     H,ATTRTXT4
+        CALL    PUTSTR_BC
+        CALL    DRAW_MODE_LABEL
+        CALL    DRAW_BITS_LABEL
         RET
 
 ATTRTXT1:       DB      'PRESS ANY KEY',0
 ATTRTXT2:       DB      'TO START THE GAME',0
-ATTRTXT3:       DB      'ENTER TO TOGGLE M1/M3',0
+ATTRTXT3:       DB      'M TO TOGGLE M1/M3',0
+ATTRTXT4:       DB      'T TO TOGGLE 7/8-BIT',0
 
 PUTSTR_BC:
         MOV     A,M
@@ -356,6 +426,42 @@ ENTER_KEY:
         MVI     A,1
         RET
 
+BREAK_KEY:
+        LDA     03840H          ; ENTER/CLEAR/BREAK/arrows/SPACE row
+        ANI     04H             ; tentative BREAK key bit
+        RZ
+        MVI     A,1
+        RET
+
+WAIT_BREAK_RELEASE:
+        CALL    BREAK_KEY
+        ORA     A
+        JNZ     WAIT_BREAK_RELEASE
+        RET
+
+SOFT_RESTART:
+        CALL    WAIT_BREAK_RELEASE
+        CALL    CLEAR_SCREEN
+        CALL    ATTRACT_START
+        XRA     A
+        STA     ROUNDNO
+        CALL    RESET_GAME
+        JMP     MAINLOOP
+
+M_KEY:
+        LDA     03802H          ; H-O row
+        ANI     020H            ; M key
+        RZ
+        MVI     A,1
+        RET
+
+T_KEY:
+        LDA     03804H          ; P-W row
+        ANI     010H            ; T key
+        RZ
+        MVI     A,1
+        RET
+
 DRAW_MODE_LABEL_IF_SHOWN:
         LDA     MODESHOW
         ORA     A
@@ -376,8 +482,24 @@ DML_PRINT:
         CALL    PUTSTR_BC
         RET
 
+DRAW_BITS_LABEL:
+        MVI     B,1
+        MVI     C,0
+        LDA     VIDBITMODE
+        ORA     A
+        JZ      DBL_7
+        LXI     H,TXT_8BIT
+        JMP     DBL_PRINT
+DBL_7:
+        LXI     H,TXT_7BIT
+DBL_PRINT:
+        CALL    PUTSTR_BC
+        RET
+
 TXT_M1:         DB      'M1',0
 TXT_M3:         DB      'M3',0
+TXT_7BIT:       DB      '7',0
+TXT_8BIT:       DB      '8',0
 
 ATTRACT_SNAKE:
         LDA     HEADPOS
@@ -392,7 +514,7 @@ ATTRACT_SNAKE:
 
         LDA     HEADPOS
         INR     A
-        CPI     72
+        CPI     89
         JC      AS_HOK
         XRA     A
 AS_HOK:
@@ -400,7 +522,7 @@ AS_HOK:
 
         LDA     TAILPOS
         INR     A
-        CPI     72
+        CPI     89
         JC      AS_TOK
         XRA     A
 AS_TOK:
@@ -408,41 +530,41 @@ AS_TOK:
         CALL    DELAY_ATTRACT
         RET
 
-; left=18 right=46 top=4 bottom=12
+; left=14 right=50 top=4 bottom=12
 POS_TO_BC:
-        CPI     29
-        JC      PT_TOP
         CPI     37
+        JC      PT_TOP
+        CPI     45
         JC      PT_RIGHT
-        CPI     65
+        CPI     81
         JC      PT_BOTTOM
         JMP     PT_LEFT
 PT_TOP:
         MVI     B,4
-        ADI     18
+        ADI     14
         MOV     C,A
         RET
 PT_RIGHT:
-        SUI     29
+        SUI     37
         ADI     5
         MOV     B,A
-        MVI     C,46
+        MVI     C,50
         RET
 PT_BOTTOM:
-        SUI     37
+        SUI     45
         MOV     E,A
-        MVI     A,45
+        MVI     A,49
         SUB     E
         MOV     C,A
         MVI     B,12
         RET
 PT_LEFT:
-        SUI     65
+        SUI     81
         MOV     E,A
         MVI     A,11
         SUB     E
         MOV     B,A
-        MVI     C,18
+        MVI     C,14
         RET
 
 DELAY_ATTRACT:
@@ -529,6 +651,9 @@ RESET_GAME:
         STA     ATTRPHASE
         STA     ROUNDWIN
         STA     SMASHTMR
+        STA     BINVACTIVE
+        STA     BINVPHASE
+        STA     BINVWAIT
         STA     LEFTPANELMODE
         STA     PLYTMR
         STA     LASTKEY
@@ -998,6 +1123,39 @@ ADD_INDEX_TO_HL:
         RET
 
 ; ============================================================
+; BEAST SCREEN-CODE TEST
+; A = character read from video RAM.
+; Returns A=1 if it is a beast symbol, A=0 otherwise.
+; Also preserves the original read character in E for callers that need
+; to continue testing the same cell against egg/infant/etc.
+; In 7-bit degraded mode, accept both TRS-80 B encodings because some
+; Model I character/video combinations visually show the other B code.
+; ============================================================
+
+IS_BEAST_CHAR_A:
+        MOV     E,A
+        LDA     CURBEASTCHR
+        CMP     E
+        JZ      IBCA_YES
+
+        LDA     VIDBITMODE
+        ORA     A
+        JNZ     IBCA_NO          ; 8-bit mode: exact beast symbol only
+
+        MOV     A,E
+        CPI     002H            ; 7-bit logical/screen-code B
+        JZ      IBCA_YES
+        CPI     042H            ; alternate B code if read back this way
+        JZ      IBCA_YES
+
+IBCA_NO:
+        XRA     A
+        RET
+IBCA_YES:
+        MVI     A,1
+        RET
+
+; ============================================================
 ; RANDOM PLACEMENT
 ; ============================================================
 
@@ -1091,11 +1249,10 @@ DO_PLAYER_MOVE:
         CPI     SPACECHR
         JZ      DPM_EMPTY
 
-        MOV     E,A
-        LDA     CURBEASTCHR
-        CMP     E
+        CALL    IS_BEAST_CHAR_A
+        ORA     A
         MOV     A,E
-        JZ      DPM_HIT_BEAST
+        JNZ     DPM_HIT_BEAST
 
         CPI     OMICRONCHR
         JZ      DPM_HIT_POISON
@@ -1136,7 +1293,7 @@ DPM_EMPTY:
         STA     PY
         MOV     A,C
         STA     PX
-        MVI     A,PLAYERCHR
+        LDA     CURPLAYERCHR
         CALL    PLOT_BC
         RET
 
@@ -1161,7 +1318,7 @@ DPM_PUSH:
         STA     PY
         MOV     A,C
         STA     PX
-        MVI     A,PLAYERCHR
+        LDA     CURPLAYERCHR
         CALL    PLOT_BC
         RET
 
@@ -1228,11 +1385,10 @@ DO_PULL_MOVE:
         CPI     SPACECHR
         JZ      PULL_EMPTY_FRONT
 
-        MOV     E,A
-        LDA     CURBEASTCHR
-        CMP     E
+        CALL    IS_BEAST_CHAR_A
+        ORA     A
         MOV     A,E
-        JZ      PULL_HIT_BEAST
+        JNZ     PULL_HIT_BEAST
         CPI     OMICRONCHR
         JZ      PULL_HIT_POISON
         CPI     INFANTCHR
@@ -1272,11 +1428,9 @@ PULL_FRONT_BLOCK:
         JZ      PULL_SOFT_CRUSH
         CPI     INFANTCHR
         JZ      PULL_LIVING_CRUSH
-        MOV     E,A
-        LDA     CURBEASTCHR
-        CMP     E
-        MOV     A,E
-        JZ      PULL_LIVING_CRUSH
+        CALL    IS_BEAST_CHAR_A
+        ORA     A
+        JNZ     PULL_LIVING_CRUSH
         JMP     PULL_FAIL
 
 PULL_SOFT_CRUSH:
@@ -1345,7 +1499,7 @@ PULL_NOBLOCKAHEAD:
         MOV     C,A
         LDA     PY
         MOV     B,A
-        MVI     A,PLAYERCHR
+        LDA     CURPLAYERCHR
         CALL    PLOT_BC
 
         ; CHECK BEHIND OLD PLAYER POSITION
@@ -1450,11 +1604,9 @@ PCS1:
         CPI     INFANTCHR
         JZ      PCTARGET_LIVING
 
-        MOV     E,A
-        LDA     CURBEASTCHR
-        CMP     E
-        MOV     A,E
-        JZ      PCTARGET_LIVING
+        CALL    IS_BEAST_CHAR_A
+        ORA     A
+        JNZ     PCTARGET_LIVING
 
         JMP     PCFAIL
 
@@ -1784,19 +1936,70 @@ SEC_FOUND:
         MVI     M,1
 
         CALL    RANDOM_EGG_DELAY
-        MOV     D,B
+        MOV     C,A             ; save low byte before EGGIDX/pointer lookup clobbers A
+        ; high byte remains safely in B; D/E are clobbered by GET_EGG_*_PTR
         LDA     EGGIDX
         CALL    GET_EGG_TLO_PTR
-        MOV     M,A
+        MOV     M,C
         LDA     EGGIDX
         CALL    GET_EGG_THI_PTR
-        MOV     M,D
+        MOV     M,B
 
+        ; Stagger eggs again so infant->beast announcements do not all pile up.
+        ; Adds roughly EGGIDX*120 ticks to the egg->infant phase.
+        CALL    ADD_EGG_STAGGER
+        CALL    ADD_TIMER_JITTER_0_127
+        RET
+
+ADD_EGG_STAGGER:
         LDA     EGGIDX
-        CPI     1
-        JZ      SEC_ADD200
-        CPI     2
-        JZ      SEC_ADD400
+        ORA     A
+        RZ
+        MOV     B,A             ; B = number of +120 tick chunks
+AES_LOOP:
+        PUSH    B
+        LDA     EGGIDX
+        CALL    GET_EGG_TLO_PTR
+        MOV     A,M
+        ADI     078H            ; +120 ticks
+        MOV     M,A
+        JNC     AES_NOCARRY
+        ; Important: do not use ACI after GET_EGG_THI_PTR.
+        ; The pointer helper uses ADD/DAD and destroys the carry flag.
+        LDA     EGGIDX
+        CALL    GET_EGG_THI_PTR
+        INR     M
+AES_NOCARRY:
+        POP     B
+        DCR     B
+        JNZ     AES_LOOP
+        RET
+
+ADD_INFANT_STAGGER:
+        LDA     EGGIDX
+        ORA     A
+        RZ
+        MOV     B,A             ; B = number of +320 tick chunks
+AIS_LOOP:
+        PUSH    B
+        ; add low byte +40h
+        LDA     EGGIDX
+        CALL    GET_EGG_TLO_PTR
+        MOV     A,M
+        ADI     040H            ; +320 = +0140h per slot
+        MOV     M,A
+        JNC     AIS_LOW_OK
+        LDA     EGGIDX
+        CALL    GET_EGG_THI_PTR
+        INR     M               ; carry out of low byte
+AIS_LOW_OK:
+        ; add high byte +01h for the +0140h chunk
+        LDA     EGGIDX
+        CALL    GET_EGG_THI_PTR
+        INR     M
+        POP     B
+        DCR     B
+        JNZ     AIS_LOOP
         RET
 
 SEC_ADD200:
@@ -1878,13 +2081,20 @@ UOE_TO_INFANT:
         MVI     M,2
 
         CALL    RANDOM_INFANT_DELAY
-        MOV     D,B
+        MOV     C,A             ; save low byte before EGGIDX/pointer lookup clobbers A
+        ; high byte remains safely in B; D/E are clobbered by GET_EGG_*_PTR
         LDA     EGGIDX
         CALL    GET_EGG_TLO_PTR
-        MOV     M,A
+        MOV     M,C
         LDA     EGGIDX
         CALL    GET_EGG_THI_PTR
-        MOV     M,D
+        MOV     M,B
+
+        ; Stagger infant->beast promotions so the BEAST banner announcements
+        ; have breathing room instead of stacking too closely.
+        ; Adds roughly EGGIDX*320 ticks to the infant phase.
+        CALL    ADD_INFANT_STAGGER
+        CALL    ADD_TIMER_JITTER_0_127
         RET
 
 UOE_TO_BEAST:
@@ -1907,16 +2117,19 @@ UOE_TO_BEAST:
         MOV     M,A
 
         CALL    RESET_DELAY_FOR_FREE_BEAST
+        CALL    START_BEAST_BANNER_FLASH
         RET
 
 UOE_RETRY:
-        MOV     D,B
+        CALL    RANDOM_RETRY_DELAY
+        MOV     C,A             ; save low byte before EGGIDX/pointer lookup clobbers A
+        ; high byte remains safely in B; D/E are clobbered by GET_EGG_*_PTR
         LDA     EGGIDX
         CALL    GET_EGG_TLO_PTR
-        MOV     M,A
+        MOV     M,C
         LDA     EGGIDX
         CALL    GET_EGG_THI_PTR
-        MOV     M,D
+        MOV     M,B
         RET
 
 GET_EGG_TLO_PTR:
@@ -2125,31 +2338,64 @@ FEAOK:
         RET
 
 RANDOM_EGG_DELAY:
-RED1:
+        ; Tuned timing after timer-storage fixes.
+        ; Returns A=low, B=high.
+        ; Normal hatch: 0708h + rand(0..255) = 1800..2055 ticks.
+        ; Rare fast hatch: 0384h + rand(0..127) = 900..1027 ticks.
         CALL    RAND8
-        CPI     180
-        JNC     RED1
+        ANI     07H
+        JZ      RED_FAST
+RED_NORMAL:
+        CALL    RAND8
         MOV     E,A
-        MVI     B,06H        ; base = 06D6h = 1750
-        MVI     A,0D6H
-        ADD     E            ; 1750..1929
-        JNC     RED2
+        MVI     B,07H
+        MVI     A,008H       ; 0708h = 1800 ticks
+        ADD     E
+        JNC     RED_RET
         INR     B
-RED2:
+RED_RET:
+        RET
+RED_FAST:
+        CALL    RAND8
+        ANI     07FH
+        MOV     E,A
+        MVI     B,03H
+        MVI     A,084H       ; 0384h = 900 ticks
+        ADD     E
+        JNC     REDF_RET
+        INR     B
+REDF_RET:
         RET
 
 RANDOM_INFANT_DELAY:
-RID1:
+        ; Tuned timing after timer-storage fixes.
+        ; Base = 0500h + rand(0..255) = 1280..1535 ticks,
+        ; then per-slot stagger and final jitter are added.
         CALL    RAND8
-        CPI     90
-        JNC     RID1
         MOV     E,A
-        MVI     B,03H        ; base = 03E8h = 1000
-        MVI     A,0E8H
-        ADD     E            ; 1000..1089
-        JNC     RID2
+        MVI     B,05H
+        MVI     A,000H       ; 0500h = 1280 ticks
+        ADD     E
+        JNC     RID_RET
         INR     B
-RID2:
+RID_RET:
+        RET
+
+ADD_TIMER_JITTER_0_127:
+        ; Adds rand(0..127) ticks to the current egg/infant timer.
+        ; Uses EGGIDX to select the active TLO/THI pair.
+        CALL    RAND8
+        ANI     07FH
+        STA     TMPVAL
+        LDA     EGGIDX
+        CALL    GET_EGG_TLO_PTR
+        LDA     TMPVAL
+        ADD     M
+        MOV     M,A
+        RNC
+        LDA     EGGIDX
+        CALL    GET_EGG_THI_PTR
+        INR     M
         RET
 
 RANDOM_RETRY_DELAY:
@@ -2199,11 +2445,9 @@ BHAB_LOOP:
         JC      BHAB_NEXT
 
         CALL    PEEK_BC
-        MOV     E,A
-        LDA     CURBEASTCHR
-        CMP     E
-        MOV     A,E
-        JZ      BHAB_YES
+        CALL    IS_BEAST_CHAR_A
+        ORA     A
+        JNZ     BHAB_YES
 
 BHAB_NEXT:
         LDA     ADJINDEX
@@ -2462,7 +2706,10 @@ CAN_BEAST_STEP:
 
 CBSCELL:
         CALL    PEEK_BC
-        CPI     PLAYERCHR
+        MOV     E,A
+        LDA     CURPLAYERCHR
+        CMP     E
+        MOV     A,E
         JZ      CBSCAP
         CPI     SPACECHR
         JZ      CBSOK
@@ -2562,7 +2809,10 @@ TRY_BEAST_STEP:
         JNZ     TBSFAIL_RESTORE
 
         CALL    PEEK_BC
-        CPI     PLAYERCHR
+        MOV     E,A
+        LDA     CURPLAYERCHR
+        CMP     E
+        MOV     A,E
         JZ      TBSCAPTURE
         CPI     SPACECHR
         JNZ     TBSFAIL_RESTORE
@@ -2988,7 +3238,7 @@ ROUND_START_COUNTDOWN:
         MOV     B,A
         LDA     PX
         MOV     C,A
-        MVI     A,PLAYERCHR
+        LDA     CURPLAYERCHR
         CALL    PLOT_BC
         RET
 
@@ -3016,7 +3266,131 @@ UPDATE_SMASH_FLASH:
         STA     LEFTPANELMODE
         RET
 
+; ============================================================
+; BEAST RIGHT-BANNER POLARITY WAVE
+; Triggered when an infant promotes to a full beast.
+; Non-blocking: advances during the normal main loop.
+; Non-queued: ignores new triggers while a wave is active.
+; Phase 00..15 = invert rows top-to-bottom.
+; Phase 16..31 = redraw normal rows bottom-to-top.
+; BINVWAIT slows the wave so it reads as a visible sweep, not a flicker.
+; ============================================================
+
+START_BEAST_BANNER_FLASH:
+        LDA     BINVACTIVE
+        ORA     A
+        RNZ
+        MVI     A,1
+        STA     BINVACTIVE
+        XRA     A
+        STA     BINVPHASE
+        STA     BINVWAIT
+        RET
+
+UPDATE_BEAST_BANNER_FLASH:
+        LDA     BINVACTIVE
+        ORA     A
+        RZ
+
+        ; slow the row advance: only act when BINVWAIT reaches zero
+        LDA     BINVWAIT
+        ORA     A
+        JZ      UBBF_DO_STEP
+        DCR     A
+        STA     BINVWAIT
+        RET
+
+UBBF_DO_STEP:
+        MVI     A,2             ; 3 main-loop frames per row step, about 33% faster than 4
+        STA     BINVWAIT
+
+        LDA     BINVPHASE
+        CPI     16
+        JC      UBBF_DOWN
+
+        ; redraw normal rows bottom-to-top: row = 31 - phase
+        MOV     B,A
+        MVI     A,31
+        SUB     B
+        STA     BINVROW
+        CALL    DRAW_BEAST_BANNER_ROW_NORMAL
+        JMP     UBBF_ADVANCE
+
+UBBF_DOWN:
+        ANI     0FH
+        STA     BINVROW
+        CALL    DRAW_BEAST_BANNER_ROW_INVERT
+
+UBBF_ADVANCE:
+        LDA     BINVPHASE
+        INR     A
+        STA     BINVPHASE
+        CPI     32
+        RC
+        XRA     A
+        STA     BINVACTIVE
+        STA     BINVPHASE
+        STA     BINVWAIT
+        RET
+
+GET_BEAST_BANNER_ROW_PTR:
+        LDA     ATTRSTYLE
+        ORA     A
+        JZ      GBBRP_USE1
+        LXI     H,ATTRSTATIC2
+        JMP     GBBRP_BASE
+GBBRP_USE1:
+        LXI     H,ATTRSTATIC
+GBBRP_BASE:
+        LDA     BINVROW
+        ADD     A
+        ADD     A              ; row * 4 bytes
+        MOV     E,A
+        MVI     D,0
+        DAD     D
+        RET
+
+DRAW_BEAST_BANNER_ROW_INVERT:
+        CALL    GET_BEAST_BANNER_ROW_PTR
+        LDA     BINVROW
+        MOV     B,A
+        MVI     C,60
+        MVI     D,4
+DBBRI_LOOP:
+        MOV     A,M
+        XRI     03FH           ; polarity swap for 6-bit art patterns
+        PUSH    H
+        PUSH    D
+        CALL    PLOT_ART_BC
+        POP     D
+        POP     H
+        INX     H
+        INR     C
+        DCR     D
+        JNZ     DBBRI_LOOP
+        RET
+
+DRAW_BEAST_BANNER_ROW_NORMAL:
+        CALL    GET_BEAST_BANNER_ROW_PTR
+        LDA     BINVROW
+        MOV     B,A
+        MVI     C,60
+        MVI     D,4
+DBBRN_LOOP:
+        MOV     A,M
+        PUSH    H
+        PUSH    D
+        CALL    PLOT_ART_BC
+        POP     D
+        POP     H
+        INX     H
+        INR     C
+        DCR     D
+        JNZ     DBBRN_LOOP
+        RET
+
 DRAW_WINLEFT_FROM_HL:
+
         MVI     B,0
 DWL_ROW:
         MVI     C,0
@@ -3515,7 +3889,7 @@ DRAW_LEGEND:
         MVI     C,22
 
         ; PLAYER
-        MVI     A,PLAYERCHR
+        LDA     CURPLAYERCHR
         CALL    PLOT_BC
         INR     C
         MVI     A,SPACECHR
@@ -3587,9 +3961,16 @@ DRAW_UI:
         LXI     H,CTRLTXT_IJKL
         CALL    PUTSTR_BC
 
-        ; Plain TRS-80 credit: beast by Xiphod - APRIL 2026
+        ; Plain TRS-80 credit. 8-bit keeps mixed case; 7-bit uses all caps.
         MVI     C,31
+        LDA     VIDBITMODE
+        ORA     A
+        JZ      DUI_CREDIT7
         LXI     H,CREDITTXT
+        JMP     DUI_CREDIT_PRINT
+DUI_CREDIT7:
+        LXI     H,CREDITTXT7
+DUI_CREDIT_PRINT:
         CALL    PUTSTR_BC
         RET
 
@@ -3601,6 +3982,8 @@ CTRLTXT_IJKL:
         DB      'IJKL: PULL',0
 CREDITTXT:
         DB      'beast by Xiphod - APRIL 2026',0
+CREDITTXT7:
+        DB      'BEAST BY XIPHOD - APRIL 2026',0
 ; ============================================================
 ; RNG
 ; ============================================================
@@ -3674,6 +4057,10 @@ RTCC1:
 
 EVENTPTR:        DW      0
 SMASHTMR:        DB      0
+BINVACTIVE:      DB      0
+BINVPHASE:       DB      0
+BINVWAIT:        DB      0
+BINVROW:         DB      0
 LEFTPANELMODE:   DB      0
 DEATHX:          DB      0
 DEATHY:          DB      0
@@ -3944,8 +4331,10 @@ CURSMART:       DB      0
 PLYTMR:         DB      0
 LASTKEY:        DB      0
 VIDMODE:        DB      0       ; 0=Model I, 1=Model III
-MODESHOW:       DB      0       ; nonzero once autodetected or toggled
+VIDBITMODE:     DB      1       ; 0=7-bit-safe video RAM, 1=8-bit video RAM
+MODESHOW:       DB      0       ; retained for compatibility; labels now always shown
 ATTRARMED:      DB      0       ; attract startup debounce frame count
+CURPLAYERCHR:   DB      PLAYERCHR
 CURBEASTCHR:    DB      BEASTCHR_M1
 CURBLOCKCHR:    DB      BLOCKCHR_M1
 
